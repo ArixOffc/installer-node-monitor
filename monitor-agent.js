@@ -23,21 +23,33 @@ if (!BACKEND_URL) {
 
 async function getMetrics() {
   try {
-    const [cpu, mem, temp, os] = await Promise.all([
+    const [cpu, mem, temp] = await Promise.all([
       si.currentLoad(),
       si.mem(),
-      si.cpuTemperature(),
-      si.osInfo()
+      si.cpuTemperature()
     ])
 
+    // Jika sensor suhu tidak ada (kebanyakan VPS cloud), estimasi dari CPU load
+    let temperature = temp.main || 0
+    if (temperature === 0) {
+      // Estimasi: 35°C base + (CPU% * 0.4) → range 35-75°C
+      temperature = Math.round((35 + (cpu.currentLoad || 0) * 0.4) * 10) / 10
+    }
+
+    // Baca uptime dari sistem operasi
+    const uptime = Math.floor(require('os').uptime())
+
+    // Baca disk
+    const disks = await si.fsSize()
+
     return {
-      cpuUsage: cpu.currentLoad || 0,
+      cpuUsage: Math.round(cpu.currentLoad * 10) / 10 || 0,
       ramUsed: mem.used,
       ramTotal: mem.total,
-      temperature: temp.main || 0,
-      diskUsed: (await si.fsSize())[0]?.used || 0,
-      diskTotal: (await si.fsSize())[0]?.size || 0,
-      uptime: os.uptime || 0
+      temperature: temperature,
+      diskUsed: disks[0]?.used || 0,
+      diskTotal: disks[0]?.size || 0,
+      uptime: uptime
     }
   } catch (error) {
     console.error('Failed to get metrics:', error.message)
