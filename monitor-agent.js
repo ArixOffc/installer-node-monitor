@@ -3,13 +3,14 @@
 import si from 'systeminformation'
 import fetch from 'node-fetch'
 import dotenv from 'dotenv'
+import os from 'os'
 
 dotenv.config()
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3000'
 const API_KEY = process.env.API_KEY
 const INTERVAL = parseInt(process.env.INTERVAL || '30000')
-const HOSTNAME = process.env.HOSTNAME || require('os').hostname()
+const HOSTNAME = process.env.HOSTNAME || os.hostname()
 
 if (!API_KEY) {
   console.error('Error: API_KEY environment variable is required')
