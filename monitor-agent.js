@@ -4,43 +4,54 @@ import si from 'systeminformation'
 import fetch from 'node-fetch'
 import dotenv from 'dotenv'
 import os from 'os'
+import { readFileSync } from 'fs'
 
 dotenv.config()
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:3000'
 const API_KEY = process.env.API_KEY
 const INTERVAL = parseInt(process.env.INTERVAL || '30000')
-const HOSTNAME = process.env.HOSTNAME || os.hostname()
+const HOSTNAME = os.hostname()
 
-if (!API_KEY) {
-  console.error('Error: API_KEY environment variable is required')
-  process.exit(1)
-}
-if (!BACKEND_URL) {
-  console.error('Error: BACKEND_URL environment variable is required')
-  process.exit(1)
+if (!API_KEY) { console.error('Error: API_KEY required'); process.exit(1) }
+if (!BACKEND_URL) { console.error('Error: BACKEND_URL required'); process.exit(1) }
+
+// ─── CPU Info Fallback ─────────────────────────────────────────────────────
+function getCpuInfoSync() {
+  let model = '', speed = 0, cores = os.cpus().length
+
+  try {
+    const info = readFileSync('/proc/cpuinfo', 'utf-8')
+    const lines = info.split('\n')
+    for (const line of lines) {
+      if (line.startsWith('model name') && !model) {
+        model = line.split(':').slice(1).join(':').trim()
+      }
+      if (line.startsWith('cpu MHz') && !speed) {
+        speed = Math.round(parseFloat(line.split(':').slice(1).join(':').trim()))
+      }
+    }
+  } catch {}
+
+  return { model: model || os.cpus()[0]?.model || 'Unknown CPU', speed: speed || os.cpus()[0]?.speed || 0, cores }
 }
 
-function formatBytes(bytes) {
-  if (!bytes || bytes === 0) return 0
-  return Math.round(bytes / 1024 / 1024) // MB
-}
-
-function formatLoad(value) {
-  return Math.round(value * 100) / 100
+function fmtB(b) {
+  if (!b) return '0 MB'
+  const mb = b / 1024 / 1024
+  return mb > 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB'
 }
 
 async function getMetrics() {
   try {
-    const [cpu, cpuInfo, mem, temp, disks, fsSize, time] = await Promise.all([
+    const [cpu, mem, temp, fsSize] = await Promise.all([
       si.currentLoad(),
-      si.cpu(),
       si.mem(),
       si.cpuTemperature(),
-      si.disksIO(),
-      si.fsSize(),
-      si.time()
+      si.fsSize()
     ])
+
+    const cpuInfo = getCpuInfoSync()
 
     // Suhu
     let temperature = temp.main || 0
@@ -48,42 +59,41 @@ async function getMetrics() {
       temperature = Math.round((35 + (cpu.currentLoad || 0) * 0.4) * 10) / 10
     }
 
-    // Disk utama (/) cari dari fsSize
-    let diskUsed = 0, diskTotal = 0, diskUsagePercent = 0
-    let diskMountCount = fsSize.length
+    // RAM
+    const ramUsed = mem.used || 0
+    const ramTotal = mem.total || 1
+    const ramAvail = mem.available || 0
+    const ramPct = Math.round((ramUsed / ramTotal) * 1000) / 10
 
-    // Cari mount point / atau /
+    // Disk
     const rootDisk = fsSize.find(d => d.mount === '/' || d.mount === '/root') || fsSize[0]
-    if (rootDisk) {
-      diskUsed = rootDisk.used
-      diskTotal = rootDisk.size
-      diskUsagePercent = Math.round(rootDisk.use || 0)
-    }
+    const diskPct = rootDisk ? Math.round((rootDisk.use || 0) * 10) / 10 : 0
 
     const metrics = {
       cpuUsage: Math.round(cpu.currentLoad * 10) / 10 || 0,
-      cpuModel: cpuInfo.brand || 'Unknown CPU',
-      cpuCores: cpuInfo.cores || 0,
-      loadAvg: [formatLoad(cpu.avgLoad)],
-      temperature: temperature,
-      ramUsed: mem.used,
-      ramTotal: mem.total,
-      ramAvail: mem.available,
-      diskUsed: diskUsed,
-      diskTotal: diskTotal,
-      diskMounts: diskMountCount,
-      diskUsagePercent: diskUsagePercent,
-      uptime: time.uptime || 0
+      cpuModel: cpuInfo.model,
+      cpuCores: cpuInfo.cores,
+      cpuSpeed: cpuInfo.speed,
+      loadAvg: [Math.round((cpu.avgLoad || 0) * 100) / 100, 0, 0],
+      temperature,
+      ramUsed,
+      ramTotal,
+      ramAvail,
+      ramPercent: ramPct,
+      diskUsed: rootDisk?.used || 0,
+      diskTotal: rootDisk?.size || 0,
+      diskMounts: fsSize.length,
+      diskUsagePercent: diskPct,
+      uptime: Math.floor(os.uptime())
     }
 
-    // Log ringkas
     console.log(
       `[${new Date().toISOString()}] ` +
-      `CPU:${metrics.cpuUsage}% ` +
-      `RAM:${formatBytes(mem.used)}/${formatBytes(mem.total)}MB ` +
+      `CPU:${metrics.cpuUsage}%(${cpuInfo.model.split(' ').slice(0,3).join(' ')}) ` +
+      `RAM:${fmtB(ramUsed)}/${fmtB(ramTotal)}(${ramPct}%) ` +
       `Temp:${temperature}°C ` +
-      `Disk:${diskUsagePercent}% ` +
-      `Up:${Math.round(time.uptime / 3600)}h`
+      `Disk:${diskPct}% ` +
+      `Up:${Math.round(metrics.uptime / 3600)}h`
     )
 
     return metrics
@@ -96,38 +106,25 @@ async function getMetrics() {
 async function reportMetrics() {
   try {
     const metrics = await getMetrics()
-
     const response = await fetch(`${BACKEND_URL}/api/agent/report`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY
-      },
-      body: JSON.stringify({
-        ...metrics,
-        hostname: HOSTNAME
-      })
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({ ...metrics, hostname: HOSTNAME })
     })
-
     if (!response.ok) {
-      const text = await response.text()
-      console.error(`[${new Date().toISOString()}] Report failed: ${response.status} - ${text}`)
-      return false
+      const t = await response.text()
+      console.error(`Report failed: ${response.status} - ${t}`)
     }
-
-    return true
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Error reporting metrics:`, error.message)
-    return false
+    console.error(`Error: ${error.message}`)
   }
 }
 
 async function start() {
   console.log(`Starting monitoring agent...`)
-  console.log(`Backend URL: ${BACKEND_URL}`)
+  console.log(`Backend: ${BACKEND_URL}`)
   console.log(`Hostname: ${HOSTNAME}`)
-  console.log(`Report interval: ${INTERVAL}ms`)
-
+  console.log(`Interval: ${INTERVAL}ms`)
   await reportMetrics()
   setInterval(reportMetrics, INTERVAL)
 }
